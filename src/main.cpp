@@ -15,6 +15,15 @@ import vulkan_hpp;
 constexpr uint32_t WIDTH  = 800;
 constexpr uint32_t HEIGHT = 600;
 
+const std::vector<char const *> validationLayers = {
+    "VK_LAYER_KHRONOS_validation"};
+
+#ifdef NDEBUG
+constexpr bool enableValidationLayers = false;
+#else
+constexpr bool enableValidationLayers = true;
+#endif
+
 class HelloVulkanApplication {
 public:
     void run() {
@@ -31,6 +40,8 @@ private:
     // RAII Vulkan Objects
     vk::raii::Context  context;
     vk::raii::Instance instance = nullptr;
+
+    vk::raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
 
     void initWindow() {
 
@@ -51,6 +62,19 @@ private:
         setupDebugMessenger();
     }
 
+    static VKAPI_ATTR vk::Bool32 VKAPI_CALL debugCallback(  vk::DebugUtilsMessageSeverityFlagBitsEXT     severity,
+                                                            vk::DebugUtilsMessageTypeFlagsEXT            type,
+                                                      const vk::DebugUtilsMessengerCallbackDataEXT *     pCallbackData,
+                                                      void *                                             pUserData) {
+
+        if (severity == vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning ||
+            severity == vk::DebugUtilsMessageSeverityFlagBitsEXT::eError) {
+            std::cerr << "validation layer: type " << to_string(type) << " msg: " << pCallbackData->pMessage << std::endl;
+            }
+
+        return vk::False;
+    }
+
     std::vector<const char*> getRequiredInstanceExtensions() {
 
         // Get the required instance extensions from GLFW.
@@ -58,6 +82,10 @@ private:
         auto glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
 
         std::vector extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+
+        if (enableValidationLayers) {
+            extensions.push_back(vk::EXTDebugUtilsExtensionName);
+        }
 
         // Contacts the Vulkan loader to retrieve a list of every instance-level extension the machine supports
         auto extensionProperties = context.enumerateInstanceExtensionProperties();
@@ -81,6 +109,36 @@ private:
         return extensions;
     }
 
+    std::vector<const char*> getRequiredInstanceLayers() {
+
+        if (!enableValidationLayers) {
+            return {};
+        }
+
+        std::vector<char const*> requiredLayers;
+        requiredLayers.assign(validationLayers.begin(), validationLayers.end());
+
+        // Contacts the Vulkan loader to retrieve a list of every validation layer the machine supports
+        auto layerProperties = context.enumerateInstanceLayerProperties();
+
+        // TODO: Follow best practices here
+        // Check if the required layers are supported by the system.
+        for (const auto& requiredLayer : requiredLayers) {
+
+            bool layerFound = false;
+            for (const auto& layerProperty : layerProperties) {
+                if (strcmp(layerProperty.layerName, requiredLayer) == 0) {
+                    layerFound = true;
+                    break;
+                }
+            }
+            if (!layerFound) {
+                throw std::runtime_error("Required layer extension not supported: " + std::string(requiredLayer));
+            }
+        }
+        return requiredLayers;
+    }
+
     void createInstance() {
 
         // Information about our application (Optional but recommended)
@@ -94,9 +152,13 @@ private:
 
         auto requiredExtensions = getRequiredInstanceExtensions();
 
+        auto requiredLayers = getRequiredInstanceLayers();
+
         // It tells the Vulkan driver which global extensions and validation layers we want to use
         vk::InstanceCreateInfo createInfo {
             .pApplicationInfo = &appInfo,
+            .enabledLayerCount = static_cast<uint32_t>(requiredLayers.size()),
+            .ppEnabledLayerNames = requiredLayers.data(),
             .enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size()),
             .ppEnabledExtensionNames = requiredExtensions.data()
         };
@@ -107,6 +169,19 @@ private:
 
     void setupDebugMessenger() {
 
+        if (!enableValidationLayers) {
+            return;
+        }
+
+        vk::DebugUtilsMessageSeverityFlagsEXT severityFlags(vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning |
+                                                                vk::DebugUtilsMessageSeverityFlagBitsEXT::eError);
+        vk::DebugUtilsMessageTypeFlagsEXT messageTypeFlags(
+                vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral | vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance | vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation);
+
+        vk::DebugUtilsMessengerCreateInfoEXT debugUtilsMessengerCreateInfoEXT{.messageSeverity = severityFlags,
+                                                                              .messageType     = messageTypeFlags,
+                                                                              .pfnUserCallback = &debugCallback};
+        debugMessenger = instance.createDebugUtilsMessengerEXT( debugUtilsMessengerCreateInfoEXT );
     }
 
     void mainLoop() {
