@@ -33,7 +33,6 @@ public:
     {
         initWindow();
         initVulkan();
-        createSurface();
         mainLoop();
         cleanup();
     }
@@ -58,7 +57,12 @@ private:
     // Device queue interface
     vk::raii::Queue graphicsQueue = nullptr;
 
-    // Check for swapchain (next chap but needed here for completion
+    vk::raii::SwapchainKHR swapChain = nullptr;
+    std::vector<vk::Image> swapChainImages;
+    vk::SurfaceFormatKHR swapChainSurfaceFormat;
+    vk::Extent2D swapChainExtent;
+
+    // Check for swapchain
     std::vector<const char*> requiredDeviceExtension = {vk::KHRSwapchainExtensionName};
 
 
@@ -79,9 +83,10 @@ private:
     {
         createInstance();
         setupDebugMessenger();
-        pickPhysicalDevice();
+        createSurface();
         pickPhysicalDevice();
         createLogicalDevice();
+        createSwapChain();
     }
 
     static VKAPI_ATTR vk::Bool32 VKAPI_CALL debugCallback(vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -220,16 +225,16 @@ private:
 
     bool checkDeviceSuitable( vk::raii::PhysicalDevice const & pD )
     {
-        bool supportsVulkan13 = physicalDevice.getProperties().apiVersion >= vk::ApiVersion13;
+        bool supportsVulkan13 = pD.getProperties().apiVersion >= vk::ApiVersion13;
 
-        auto queueFamilies = physicalDevice.getQueueFamilyProperties();
+        auto queueFamilies = pD.getQueueFamilyProperties();
         bool supportsGraphics =
                 std::ranges::any_of(queueFamilies, [](auto const &qfp)
                 {
                     return !!(qfp.queueFlags & vk::QueueFlagBits::eGraphics);
                 });
 
-        auto availableDeviceExtensions = physicalDevice.enumerateDeviceExtensionProperties();
+        auto availableDeviceExtensions = pD.enumerateDeviceExtensionProperties();
         bool supportsAllRequiredExtensions =
                 std::ranges::all_of(requiredDeviceExtension,
                                     [&availableDeviceExtensions](auto const &requiredDeviceExtension)
@@ -246,7 +251,7 @@ private:
                                     });
 
 
-        auto features = physicalDevice.template getFeatures2<vk::PhysicalDeviceFeatures2,
+        auto features = pD.template getFeatures2<vk::PhysicalDeviceFeatures2,
             vk::PhysicalDeviceVulkan11Features,
             vk::PhysicalDeviceVulkan13Features,
             vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
@@ -376,6 +381,134 @@ private:
         // GLFW doesn’t offer a special function for destroying a surface, but wrapping it in our raii SurfaceKHR object will let Vulkan RAII take care of that for us
         surface = vk::raii::SurfaceKHR(instance, _surface);
     }
+
+    vk::SurfaceFormatKHR chooseSwapSurfaceFormat(std::vector<vk::SurfaceFormatKHR> const &availableFormats)
+    {
+        // Check for SRGB format first
+        const auto formatIt = std::ranges::find_if(
+            availableFormats,
+            [](const auto &format)
+            {
+                return format.format == vk::Format::eB8G8R8A8Srgb &&
+                       format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear;
+            });
+
+        if (formatIt != availableFormats.end())
+        {
+            return *formatIt;
+        }
+
+        // The Fallback: Use an ordered map to automatically sort candidates by increasing score
+        std::multimap<int, vk::SurfaceFormatKHR> candidates;
+
+        for (const auto &format: availableFormats)
+        {
+            int score = 0;
+
+            // SRGB color space is highly preferred for accurate perceived colors
+            if (format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear)
+            {
+                score += 100;
+            }
+
+            // Prefer standard 32-bit (8 bits per channel) color formats
+            if (format.format == vk::Format::eR8G8B8A8Srgb || format.format == vk::Format::eB8G8R8A8Srgb)
+            {
+                score += 50;
+            }
+            // If standard SRGB formats are missing, fall back to UNORM (linear) formats
+            else if (format.format == vk::Format::eR8G8B8A8Unorm || format.format == vk::Format::eB8G8R8A8Unorm)
+            {
+                score += 25;
+            }
+
+            candidates.insert(std::make_pair(score, format));
+        }
+
+        if (!candidates.empty())
+        {
+            return candidates.rbegin()->second;
+        }
+
+        return availableFormats[0];
+    }
+
+    vk::PresentModeKHR chooseSwapPresentMode(std::vector<vk::PresentModeKHR> const &availablePresentModes)
+    {
+        // eFifo always available
+        assert(
+            std::ranges::any_of(availablePresentModes, [](auto presentMode) { return presentMode == vk::PresentModeKHR::
+                eFifo; }));
+        // Try mailbox (Masti) otherwise Fifo
+        return std::ranges::any_of(availablePresentModes,
+                                   [](const vk::PresentModeKHR value) { return vk::PresentModeKHR::eMailbox == value; })
+                   ? vk::PresentModeKHR::eMailbox
+                   : vk::PresentModeKHR::eFifo;
+    }
+
+    vk::Extent2D chooseSwapExtent(vk::SurfaceCapabilitiesKHR const &capabilities)
+    {
+        // currentExtent is only set to the special "undefined" value described above
+        // when the window manager lets us choose the extent ourselves; any other value
+        // means the surface already dictates a fixed extent that we must use as-is.
+        if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max())
+        {
+            return capabilities.currentExtent;
+        }
+
+        int width, height;
+        glfwGetFramebufferSize(window, &width, &height);
+
+        return {
+            std::clamp<uint32_t>(width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
+            std::clamp<uint32_t>(height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)
+        };
+    }
+
+    uint32_t chooseSwapMinImageCount(vk::SurfaceCapabilitiesKHR const &surfaceCapabilities)
+    {
+        auto minImageCount = std::max(3u, surfaceCapabilities.minImageCount);
+        if ((0 < surfaceCapabilities.maxImageCount) && (surfaceCapabilities.maxImageCount < minImageCount))
+        {
+            minImageCount = surfaceCapabilities.maxImageCount;
+        }
+        return minImageCount;
+    }
+
+    void createSwapChain()
+    {
+        // basic surface capabilities
+        auto surfaceCapabilities = physicalDevice.getSurfaceCapabilitiesKHR( *surface );
+        swapChainExtent = chooseSwapExtent(surfaceCapabilities);
+        uint32_t minImageCount = chooseSwapMinImageCount(surfaceCapabilities);
+
+        // supported surface formats
+        std::vector<vk::SurfaceFormatKHR> availableFormats = physicalDevice.getSurfaceFormatsKHR( *surface );
+        swapChainSurfaceFormat = chooseSwapSurfaceFormat(availableFormats);
+
+        // supported presentation modes
+        std::vector<vk::PresentModeKHR> availablePresentModes = physicalDevice.getSurfacePresentModesKHR( *surface );
+        vk::PresentModeKHR presentMode = chooseSwapPresentMode(availablePresentModes);
+
+        vk::SwapchainCreateInfoKHR swapChainCreateInfo{
+            .surface = *surface,
+            .minImageCount = minImageCount,
+            .imageFormat = swapChainSurfaceFormat.format,
+            .imageColorSpace = swapChainSurfaceFormat.colorSpace,
+            .imageExtent = swapChainExtent,
+            .imageArrayLayers = 1,
+            .imageUsage = vk::ImageUsageFlagBits::eColorAttachment,
+            .imageSharingMode = vk::SharingMode::eExclusive,
+            .preTransform = surfaceCapabilities.currentTransform,
+            .compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque,
+            .presentMode = chooseSwapPresentMode(availablePresentModes),
+            .clipped = true
+        };
+
+        swapChain = vk::raii::SwapchainKHR(device, swapChainCreateInfo);
+        swapChainImages = swapChain.getImages();
+    }
+
 
     void mainLoop()
     {
