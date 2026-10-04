@@ -32,5 +32,5 @@ VertexOutput vertMain(uint vid: SV_VertexID)
 float4 fragMain(VertexOutput inVert) : SV_Target
 {
     float3 color = inVert.color;
-    return float4(1.0, 0.0, 0.0, 1.0);
+    return float4(color, 1.0);
 }

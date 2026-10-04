@@ -73,6 +73,10 @@ private:
 
     vk::raii::CommandBuffer commandBuffer = nullptr;
 
+    vk::raii::Semaphore presentCompleteSemaphore = nullptr;
+    vk::raii::Semaphore renderFinishedSemaphore = nullptr;
+    vk::raii::Fence drawFence = nullptr;
+
     uint32_t queueIndex = ~0;
     // Check for swapchain
     std::vector<const char*> requiredDeviceExtension = {vk::KHRSwapchainExtensionName};
@@ -103,6 +107,7 @@ private:
         createGraphicsPipeline();
         createCommandPool();
         createCommandBuffer();
+        createSyncObjects();
     }
 
     static VKAPI_ATTR vk::Bool32 VKAPI_CALL debugCallback(vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -272,6 +277,7 @@ private:
             vk::PhysicalDeviceVulkan13Features,
             vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
         bool supportsRequiredFeatures = features.template get<vk::PhysicalDeviceVulkan11Features>().shaderDrawParameters &&
+                                        features.template get<vk::PhysicalDeviceVulkan13Features>().synchronization2 &&
                                         features.template get<vk::PhysicalDeviceVulkan13Features>().dynamicRendering &&
                                         features.template get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().
                                         extendedDynamicState;
@@ -364,7 +370,7 @@ private:
                 featureChain = {
                     {}, // vk::PhysicalDeviceFeatures2
                     {.shaderDrawParameters = true}, // vk::PhysicalDeviceVulkan11Features
-                    {.dynamicRendering = true}, // vk::PhysicalDeviceVulkan13Features
+                    {.synchronization2 = true, .dynamicRendering = true}, // vk::PhysicalDeviceVulkan13Features
                     {.extendedDynamicState = true} // vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT
                 };
 
@@ -783,19 +789,64 @@ private:
         commandBuffer = std::move(vk::raii::CommandBuffers(device, allocInfo).front());
     }
 
+    void createSyncObjects()
+    {
+        presentCompleteSemaphore = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
+        renderFinishedSemaphore = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
+        drawFence = vk::raii::Fence(device, {.flags = vk::FenceCreateFlagBits::eSignaled});
+    }
+
+    void drawFrame()
+    {
+        auto fenceResult = device.waitForFences(*drawFence, vk::True, UINT64_MAX);
+        if (fenceResult != vk::Result::eSuccess)
+        {
+            throw std::runtime_error("failed to wait for fence!");
+        }
+        device.resetFences(*drawFence);
+
+        auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore, nullptr);
+
+        recordCommandBuffer(imageIndex);
+
+        vk::PipelineStageFlags waitDestinationStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput);
+        const vk::SubmitInfo submitInfo{
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &*presentCompleteSemaphore,
+            .pWaitDstStageMask = &waitDestinationStageMask,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &*commandBuffer,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &*renderFinishedSemaphore
+        };
+
+        graphicsQueue.submit(submitInfo, *drawFence);
+
+        const vk::PresentInfoKHR presentInfoKHR{
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &*renderFinishedSemaphore,
+            .swapchainCount = 1,
+            .pSwapchains = &*swapChain,
+            .pImageIndices = &imageIndex
+        };
+
+        auto presentResult = graphicsQueue.presentKHR(presentInfoKHR);
+    }
+
     void mainLoop()
     {
         bool running = true;
         while (running)
         {
             glfwPollEvents();
-
+            drawFrame();
             // Check for exit
             if (glfwWindowShouldClose(window))
             {
                 running = false;
                 break;
             }
+            device.waitIdle();
         }
     }
 
